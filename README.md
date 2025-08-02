@@ -74,6 +74,55 @@ The typical workflow is:
 | ----------------- | ------------------------------------------------------------------------------------ |
 | `notedmd convert` | Converts a file or all supported files in a directory into Markdown.                 |
 | `notedmd config`  | Manages the AI provider configuration. Shows the current config if no flags are used. |
+| `notedmd security` | Manages security settings including master password and API key encryption.          |
+
+---
+
+## Security
+
+`noted.md` includes built-in security features to protect your sensitive API keys using encryption.
+
+### Master Password
+
+When you first run a sensitive command (like `config --edit` or `convert`), you'll be prompted to set up a master password. This password is used to encrypt all your API keys stored in the configuration.
+
+The master password is never stored directly; instead, a verification hash is securely saved to confirm your password when needed.
+
+### Security Commands
+
+| Flag                             | Description                                                                 |
+| -------------------------------- | --------------------------------------------------------------------------- |
+| `--migrate`                      | Migrate plaintext API keys to encrypted format.                             |
+| `--change-master-password`       | Change your master password while preserving encrypted data.                |
+| `--reset`                        | Reset your master password (warning: this clears all encrypted API keys).   |
+
+**Examples:**
+
+- Migrate from plaintext to encrypted configuration:
+  ```bash
+  notedmd security --migrate
+  ```
+
+- Change your master password:
+  ```bash
+  notedmd security --change-master-password
+  ```
+
+- Reset your master password (and clear all API keys):
+  ```bash
+  notedmd security --reset
+  ```
+
+### Migration from Older Versions
+
+If you're upgrading from an older version of `noted.md` that stored API keys in plaintext:
+
+1. You'll be prompted to run the migration command when you first use a sensitive operation
+2. Run `notedmd security --migrate` to encrypt all your existing API keys
+3. Enter a new master password when prompted
+4. Your configuration will be updated with encrypted API keys
+
+After migration, you'll need to enter your master password whenever performing sensitive operations.
 
 ---
 
@@ -85,16 +134,23 @@ For first-time users, the interactive setup is the easiest way to get started. R
 ```bash
 notedmd config --edit
 ```
-This will guide you through selecting an AI provider (Gemini, Claude, or Ollama) and entering the necessary credentials, such as API keys or server details.
+This will guide you through:
+1. Setting up a master password for encrypting sensitive data
+2. Selecting an AI provider (Gemini, Claude, Ollama, or OpenAI-compatible)
+3. Entering the necessary credentials, such as API keys or server details
+
+Your API keys will be encrypted with your master password to ensure they're stored securely.
 
 ### AI Providers
 
-You can choose between three AI providers.
+You can choose between multiple AI providers.
 
 #### Gemini and Claude APIs
 You will need an API key from your chosen provider:
 - **Gemini API:** [Google AI Studio](https://aistudio.google.com/app/apikey)
 - **Claude API:** [Anthropic's website](https://console.anthropic.com/dashboard)
+
+> **Security Note**: All API keys are encrypted with your master password and stored securely. The keys are only decrypted in memory when needed for API requests.
 
 #### Ollama
 Make sure Ollama is installed and running on your local machine. You can download it from [Ollama's website](https://ollama.com/).
@@ -163,6 +219,7 @@ Once configured, you can convert your handwritten notes.
 
 -   **Convert a single file**:
     The converted file will be saved in the same directory with a `.md` extension (e.g., `my_document.md`).
+    You'll be prompted for your master password to decrypt the API key.
     ```bash
     notedmd convert my_document.pdf
     ```
