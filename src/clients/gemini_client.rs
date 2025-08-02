@@ -127,8 +127,7 @@ impl AiProvider for GeminiClient {
                 }
             }
             return Err(NotedError::ApiError(format!(
-                "Received status code: {}",
-                status
+                "Received status code: {status}"
             )));
         }
 

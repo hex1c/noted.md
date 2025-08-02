@@ -1,5 +1,5 @@
-use crate::error::NotedError;
 use crate::encryption::EncryptionData;
+use crate::error::NotedError;
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 use std::{fs, path::PathBuf};
@@ -87,7 +87,7 @@ impl Config {
         }
         Ok(())
     }
-    
+
     /// Check if the config contains any unencrypted API keys that need migration
     pub fn needs_migration(&self) -> bool {
         // Check each provider's API key to see if it needs migration
@@ -97,19 +97,19 @@ impl Config {
                 return true;
             }
         }
-        
+
         if let Some(claude) = &self.claude {
             if !claude.api_key.is_empty() && !claude.api_key.is_encrypted_format() {
                 return true;
             }
         }
-        
+
         if let Some(notion) = &self.notion {
             if !notion.api_key.is_empty() && !notion.api_key.is_encrypted_format() {
                 return true;
             }
         }
-        
+
         if let Some(openai) = &self.openai {
             if let Some(api_key) = &openai.api_key {
                 if !api_key.is_empty() && !api_key.is_encrypted_format() {
@@ -117,14 +117,14 @@ impl Config {
                 }
             }
         }
-        
+
         false
     }
-    
+
     /// Migrate plaintext API keys to encrypted format
     pub fn migrate(&mut self, master_password: &str) -> Result<(), NotedError> {
         use crate::encryption::EncryptionData;
-        
+
         // Migrate Gemini API key
         if let Some(gemini) = &mut self.gemini {
             if !gemini.api_key.is_empty() && !gemini.api_key.is_encrypted_format() {
@@ -132,7 +132,7 @@ impl Config {
                     .map_err(|e| NotedError::EncryptionError(e.to_string()))?;
             }
         }
-        
+
         // Migrate Claude API key
         if let Some(claude) = &mut self.claude {
             if !claude.api_key.is_empty() && !claude.api_key.is_encrypted_format() {
@@ -140,7 +140,7 @@ impl Config {
                     .map_err(|e| NotedError::EncryptionError(e.to_string()))?;
             }
         }
-        
+
         // Migrate Notion API key
         if let Some(notion) = &mut self.notion {
             if !notion.api_key.is_empty() && !notion.api_key.is_encrypted_format() {
@@ -148,19 +148,21 @@ impl Config {
                     .map_err(|e| NotedError::EncryptionError(e.to_string()))?;
             }
         }
-        
+
         // Migrate OpenAI API key if it exists
         if let Some(openai) = &mut self.openai {
             if let Some(api_key) = &openai.api_key {
                 if !api_key.is_empty() && !api_key.is_encrypted_format() {
-                    openai.api_key = Some(EncryptionData::new(api_key.as_str(), master_password)
-                        .map_err(|e| NotedError::EncryptionError(e.to_string()))?);
+                    openai.api_key = Some(
+                        EncryptionData::new(api_key.as_str(), master_password)
+                            .map_err(|e| NotedError::EncryptionError(e.to_string()))?,
+                    );
                 }
             }
         }
-        
+
         self.save()?;
-        
+
         Ok(())
     }
 }
