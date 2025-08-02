@@ -47,6 +47,7 @@ pub struct DatabaseProperty {
 #[derive(Deserialize, Debug)]
 #[serde(tag = "type")]
 #[serde(rename_all = "snake_case")]
+#[allow(dead_code)]
 pub enum PropertyType {
     Title(EmptyStruct),
     RichText(EmptyStruct),
@@ -157,7 +158,7 @@ impl NotionClient {
     ) -> Result<NotionResponse, NotedError> {
         let url = "https://api.notion.com/v1/pages";
         let arena = Arena::new();
-        let blocks = converter::Converter::run(&markdown_content, &arena)
+        let blocks = converter::Converter::run(markdown_content, &arena)
             .map_err(|e| NotedError::ApiError(e.to_string()))?;
 
         let mut props_map = serde_json::Map::new();

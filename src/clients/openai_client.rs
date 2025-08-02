@@ -120,7 +120,7 @@ impl AiProvider for OpenAIClient {
         let mut request = self.client.post(&url);
 
         if let Some(api_key) = &self.api_key {
-            request = request.header("Authorization", format!("Bearer {}", api_key));
+            request = request.header("Authorization", format!("Bearer {api_key}"));
         }
 
         let response = request.json(&request_body).send().await?;
@@ -136,8 +136,7 @@ impl AiProvider for OpenAIClient {
                 }
             }
             return Err(NotedError::ApiError(format!(
-                "Received status code: {}",
-                status
+                "Received status code: {status}"
             )));
         }
 

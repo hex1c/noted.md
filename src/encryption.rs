@@ -208,7 +208,7 @@ impl MasterPassword {
                 .map_err(|e| EncryptionError::EncryptionFailure(e.to_string()))?;
                 
             // Store a verification hash that we can check against later
-            let hash = format!("{}:{}", salt, STANDARD.encode(&key));
+            let hash = format!("{}:{}", salt, STANDARD.encode(key));
             
             // Create directory if it doesn't exist
             if let Some(parent) = path.parent() {

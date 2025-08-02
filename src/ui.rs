@@ -37,7 +37,7 @@ pub fn print_clean_config(config: Config) {
             "{:.3}***************** (hidden for security)",
             gemini_config.api_key
         );
-        println!("  API Key: {}", api_key);
+        println!("  API Key: {api_key}");
     } else {
         println!("  (Not Configured)");
     }
@@ -48,7 +48,7 @@ pub fn print_clean_config(config: Config) {
             "{:.3}***************** (hidden for security)",
             claude_config.api_key
         );
-        println!("  API Key: {}", api_key);
+        println!("  API Key: {api_key}");
         println!("  Model:   {}", claude_config.model);
     } else {
         println!("  (Not Configured)");
@@ -75,7 +75,7 @@ pub fn print_clean_config(config: Config) {
             )
         };
 
-        println!("  API Key: {}", api_key);
+        println!("  API Key: {api_key}");
     } else {
         println!("  (Not Configured)");
     }
@@ -86,7 +86,7 @@ pub fn print_clean_config(config: Config) {
             "{:.3}***************** (hidden for security)",
             notion_config.api_key
         );
-        println!("  API Key: {}", api_key);
+        println!("  API Key: {api_key}");
         println!("  Database ID: {}", notion_config.database_id);
         println!(
             "  Title Property Name: {}",

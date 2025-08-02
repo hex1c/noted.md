@@ -54,7 +54,7 @@ async fn process_and_save_file(
 
     progress_bar.println(format!(
         "\n{}",
-        format!("Processing file: {:#?}", file_name).bold()
+        format!("Processing file: {file_name:#?}").bold()
     ));
 
     let file_data = file_utils::process_file(file_path)?;
@@ -347,7 +347,7 @@ async fn run() -> Result<(), NotedError> {
             if show_path {
                 if let Some(config_path) = config::get_config_path() {
                     if config_path.exists() {
-                        println!("Config saved in {:?}", config_path);
+                        println!("Config saved in {config_path:?}");
                     } else {
                         return Err(NotedError::ConfigNotFound);
                     }
@@ -591,16 +591,14 @@ async fn run() -> Result<(), NotedError> {
                             let properties: Vec<_> = schema
                                 .properties
                                 .into_iter()
-                                .filter(|(_name, property)| match &property.type_specific_config {
+                                .filter(|(_name, property)| matches!(&property.type_specific_config,
                                     PropertyType::Select { .. }
                                     | PropertyType::MultiSelect { .. }
                                     | PropertyType::RichText(_)
                                     | PropertyType::Number(_)
                                     | PropertyType::Date(_)
-                                    | PropertyType::Checkbox(_) => true,
-
-                                    _ => false,
-                                })
+                                    | PropertyType::Checkbox(_)
+                                ))
                                 .collect();
 
                             let mut default_properties = Vec::new();
@@ -625,8 +623,7 @@ async fn run() -> Result<(), NotedError> {
                                         let selections =
                                             MultiSelect::with_theme(&ColorfulTheme::default())
                                                 .with_prompt(format!(
-                                                    "Select default options for '{}' (press Space to select and Enter to confirm)",
-                                                    name
+                                                    "Select default options for '{name}' (press Space to select and Enter to confirm)"
                                                 ))
                                                 .items(&options)
                                                 .interact()?;
@@ -648,7 +645,7 @@ async fn run() -> Result<(), NotedError> {
                                             .map(|option| option.name.clone())
                                             .collect();
                                         let selection = Select::with_theme(&ColorfulTheme::default())
-                                                .with_prompt(format!("Select default option for '{}' (Select and Enter to confirm)", name))
+                                                .with_prompt(format!("Select default option for '{name}' (Select and Enter to confirm)"))
                                                 .items(&options)
                                                 .interact()?;
                                         let selected_name = options[selection].clone();
@@ -662,7 +659,7 @@ async fn run() -> Result<(), NotedError> {
                                     PropertyType::RichText(_) => {
                                         let default_value: String =
                                             Input::with_theme(&ColorfulTheme::default())
-                                                .with_prompt(format!("Default text for '{}'", name))
+                                                .with_prompt(format!("Default text for '{name}'"))
                                                 .interact_text()?;
                                         let prop_config = config::NotionPropertyConfig {
                                             name: name.clone(),
@@ -675,8 +672,7 @@ async fn run() -> Result<(), NotedError> {
                                         let checked =
                                             Confirm::with_theme(&ColorfulTheme::default())
                                                 .with_prompt(format!(
-                                                    "Should '{}' be checked by default?",
-                                                    name
+                                                    "Should '{name}' be checked by default?"
                                                 ))
                                                 .interact()?;
                                         let prop_config = config::NotionPropertyConfig {
@@ -691,8 +687,7 @@ async fn run() -> Result<(), NotedError> {
                                         let default_value: String =
                                             Input::with_theme(&ColorfulTheme::default())
                                                 .with_prompt(format!(
-                                                    "Default date for '{}' (YYYY-MM-DD)",
-                                                    name
+                                                    "Default date for '{name}' (YYYY-MM-DD)"
                                                 ))
                                                 .interact_text()?;
                                         let prop_config = config::NotionPropertyConfig {
@@ -707,8 +702,7 @@ async fn run() -> Result<(), NotedError> {
                                         let default_value: f64 =
                                             Input::with_theme(&ColorfulTheme::default())
                                                 .with_prompt(format!(
-                                                    "Default number for '{}'",
-                                                    name
+                                                    "Default number for '{name}'"
                                                 ))
                                                 .interact()?;
                                         let prop_config = config::NotionPropertyConfig {
@@ -738,7 +732,7 @@ async fn run() -> Result<(), NotedError> {
                             });
                             config.save()?;
                         }
-                        Err(e) => eprintln!("{}", e),
+                        Err(e) => eprintln!("{e}"),
                     }
                 }
                 println!(
@@ -762,8 +756,7 @@ async fn run() -> Result<(), NotedError> {
                         "openai" => config.openai.is_some(),
                         _ => {
                             eprintln!(
-                                "Invalid provider '{}'. Please choose from 'gemini', 'claude', or 'ollama'.",
-                                new_provider
+                                "Invalid provider '{new_provider}'. Please choose from 'gemini', 'claude', or 'ollama'."
                             );
                             return Ok(());
                         }
@@ -891,7 +884,7 @@ async fn run() -> Result<(), NotedError> {
             if !input_path.exists() {
                 return Err(NotedError::IoError(std::io::Error::new(
                     std::io::ErrorKind::NotFound,
-                    format!("Input path not found: {}", path),
+                    format!("Input path not found: {path}"),
                 )));
             }
             let (notion_client, notion_config) = if notion {

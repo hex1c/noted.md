@@ -140,8 +140,7 @@ impl AiProvider for ClaudeClient {
                 }
             }
             return Err(NotedError::ApiError(format!(
-                "Received status code: {}",
-                status
+                "Received status code: {status}"
             )));
         }
 
