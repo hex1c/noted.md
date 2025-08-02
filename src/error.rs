@@ -54,4 +54,16 @@ pub enum NotedError {
 
     #[error(" Dialoguer error: {0}")]
     DialoguerError(#[from] dialoguer::Error),
+    
+    #[error(" Encryption error: {0}")]
+    EncryptionError(String),
+    
+    #[error(" Master password required. Please set up a master password first.")]
+    MasterPasswordRequired,
+    
+    #[error(" Invalid master password.")]
+    InvalidMasterPassword,
+    
+    #[error(" Configuration needs migration: {0}")]
+    MigrationRequired(String),
 }

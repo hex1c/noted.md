@@ -1,4 +1,4 @@
-use crate::Config;
+use crate::config::Config;
 use colored::Colorize;
 
 pub fn ascii_art() {
