@@ -6,4 +6,5 @@ pub mod encryption;
 pub mod error;
 pub mod file_utils;
 pub mod notion;
+pub mod storage;
 pub mod ui;

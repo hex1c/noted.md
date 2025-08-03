@@ -6,6 +6,7 @@ mod encryption;
 mod error;
 mod file_utils;
 mod notion;
+mod storage;
 mod ui;
 
 use ai_provider::AiProvider;
@@ -22,11 +23,10 @@ use encryption::{EncryptionData, MasterPassword, prompt_for_master_password};
 use error::NotedError;
 use indicatif::ProgressBar;
 use indicatif::ProgressStyle;
+use storage::{FileMetadata, StorageProvider, create_storage_provider};
 
 use crate::clients::claude_client::ClaudeClient;
 use crate::clients::gemini_client::GeminiClient;
-use crate::clients::notion_client::NotionClient;
-use crate::clients::notion_client::PropertyType;
 use crate::clients::ollama_client::OllamaClient;
 use crate::clients::openai_client::OpenAIClient;
 use crate::config::NotionConfig;
@@ -85,75 +85,36 @@ async fn process_file_with_ai(
     Ok(markdown)
 }
 
-async fn save_file_and_notion(
+async fn store_content_with_provider(
     file_path: &str,
     markdown: &str,
     output_dir: Option<&str>,
     progress_bar: &ProgressBar,
-    notion_client: Option<&NotionClient>,
-    notion_config: Option<&NotionConfig>,
+    storage_provider: &dyn StorageProvider,
 ) -> Result<(), NotedError> {
-    let path = Path::new(file_path);
-    let file_name = match path.file_name() {
-        Some(name) => name,
-        None => {
-            return Err(NotedError::FileNameError(file_path.to_string()));
-        }
-    };
-
-    let output_path = match output_dir {
-        Some(dir) => {
-            let dir_path = Path::new(dir);
-            if !dir_path.exists() {
-                std::fs::create_dir_all(dir_path)?;
-            }
-            let final_path = dir_path.join(file_name);
-            final_path
-                .with_extension("md")
-                .to_string_lossy()
-                .into_owned()
-        }
-        None => path.with_extension("md").to_string_lossy().into_owned(),
-    };
-
-    match std::fs::write(&output_path, markdown) {
-        Ok(_) => {
+    let metadata = FileMetadata::new(file_path.to_string(), output_dir.map(|s| s.to_string()))?;
+    
+    progress_bar.set_message(format!("Storing with {} provider...", storage_provider.provider_name()));
+    
+    // Check if provider can handle the content
+    storage_provider.can_handle_content(markdown)?;
+    
+    match storage_provider.store(markdown, &metadata).await {
+        Ok(location) => {
             progress_bar.println(format!(
                 "{} {}",
                 "✔".green(),
-                format!("Markdown saved to '{}'", output_path.cyan()).green()
+                format!("Content stored to '{}' using {}", location.cyan(), storage_provider.provider_name()).green()
             ));
-            if let (Some(client), Some(config)) = (notion_client, notion_config) {
-                match client
-                    .create_notion_page(
-                        file_name.to_string_lossy().into_owned().as_str(),
-                        &config.title_property_name,
-                        &config.properties,
-                        markdown,
-                    )
-                    .await
-                {
-                    Ok(page) => {
-                        progress_bar.println(format!(
-                            "{} {}",
-                            "✔".green(),
-                            format!("Notion page created at '{}'", page.url.cyan()).green()
-                        ));
-                    }
-                    Err(e) => {
-                        return Err(e);
-                    }
-                }
-            };
             Ok(())
         }
         Err(e) => {
             progress_bar.println(format!(
                 "{} {}",
                 "✖".red(),
-                format!("Failed to save file to '{}'. Error: {}", &output_path, e).red()
+                format!("Failed to store content using {}. Error: {}", storage_provider.provider_name(), e).red()
             ));
-            Err(e.into())
+            Err(e)
         }
     }
 }
@@ -504,7 +465,7 @@ async fn run() -> Result<(), NotedError> {
                 ascii_art();
                 println!(
                     "{}\n",
-                    "Welcome to noted.md! Let's set up your AI provider.".bold()
+                    "Welcome to noted.md! Let's configure your settings.".bold()
                 );
 
                 // For sensitive operations, require master password
@@ -512,329 +473,375 @@ async fn run() -> Result<(), NotedError> {
                     .await?
                     .ok_or(NotedError::MasterPasswordRequired)?;
 
-                let providers = vec![
-                    "Gemini API (Cloud-based, requires API key)",
-                    "Claude API (Cloud-based, requires API key)",
-                    "Ollama (Local, requires Ollama to be set up)",
-                    "OpenAI Compatible API (Cloud/Local, works with LM Studio)",
+                let config_options = vec![
+                    "Configure AI Provider",
+                    "Configure Storage Provider",
+                    "Exit",
                 ];
-                let selected_provider = Select::with_theme(&ColorfulTheme::default())
-                    .with_prompt("Choose your AI provider")
-                    .items(&providers)
-                    .default(0)
-                    .interact()?;
-
-                match selected_provider {
-                    0 => {
-                        let mut config = Config::load()?;
-                        let api_key = Password::with_theme(&ColorfulTheme::default())
-                            .with_prompt("Enter your Gemini API key: ")
-                            .interact()?;
-
-                        // Encrypt the API key
-                        let encrypted_key = EncryptionData::new(&api_key, &master_password)
-                            .map_err(|e| NotedError::EncryptionError(e.to_string()))?;
-
-                        config.active_provider = Some("gemini".to_string());
-                        config.gemini = Some(GeminiConfig {
-                            api_key: encrypted_key,
-                        });
-                        config.save()?;
-                        println!("{}", "Config saved successfully.".green());
-                    }
-                    1 => {
-                        let mut config = Config::load()?;
-                        let api_key = Password::with_theme(&ColorfulTheme::default())
-                            .with_prompt("Enter your Claude API key: ")
-                            .interact()?;
-
-                        // Encrypt the API key
-                        let encrypted_key = EncryptionData::new(&api_key, &master_password)
-                            .map_err(|e| NotedError::EncryptionError(e.to_string()))?;
-
-                        config.active_provider = Some("claude".to_string());
-                        let anthropic_models = vec![
-                            "    claude-opus-4-20250514",
-                            "    claude-sonnet-4-20250514",
-                            "    claude-3-7-sonnet-20250219",
-                            "    claude-3-5-haiku-20241022",
-                            "    claude-3-5-sonnet-20241022",
-                            "    Other",
-                        ];
-                        let selected_model = Select::with_theme(&ColorfulTheme::default())
-                            .with_prompt("Choose your Claude model:")
-                            .items(&anthropic_models)
-                            .default(0)
-                            .interact()?;
-
-                        let model = if selected_model == anthropic_models.len() - 1 {
-                            Input::with_theme(&ColorfulTheme::default())
-                                .with_prompt("Enter the custom model name:")
-                                .interact_text()?
-                        } else {
-                            anthropic_models[selected_model].trim().to_string()
-                        };
-
-                        config.claude = Some(ClaudeConfig {
-                            api_key: encrypted_key,
-                            model,
-                        });
-                        config.save()?;
-                        println!("{}", "Config saved successfully.".green());
-                    }
-                    2 => {
-                        let url = Input::with_theme(&ColorfulTheme::default())
-                            .with_prompt("Ollama server url")
-                            .default("http://localhost:11434".to_string())
-                            .interact_text()?;
-
-                        let model = Input::with_theme(&ColorfulTheme::default())
-                            .with_prompt("Ollama model")
-                            .default("gemma3:27b".to_string())
-                            .interact_text()?;
-
-                        let mut config = Config::load()?;
-                        config.active_provider = Some("ollama".to_string());
-                        config.ollama = Some(OllamaConfig { url, model });
-                        config.save()?;
-                        println!("{}", "Config saved successfully.".green());
-                    }
-                    3 => {
-                        let url = Input::with_theme(&ColorfulTheme::default())
-                            .with_prompt("Server url")
-                            .default("http://localhost:1234".to_string())
-                            .interact_text()?;
-
-                        let model = Input::with_theme(&ColorfulTheme::default())
-                            .with_prompt("Model")
-                            .default("gemma3:27b".to_string())
-                            .interact_text()?;
-
-                        let api_key_str = Password::with_theme(&ColorfulTheme::default())
-                            .with_prompt("Enter your API key (Optional, press Enter if none): ")
-                            .allow_empty_password(true)
-                            .interact()?;
-
-                        let api_key = if api_key_str.is_empty() {
-                            None
-                        } else {
-                            // Encrypt the API key if provided
-                            let encrypted_key = EncryptionData::new(&api_key_str, &master_password)
-                                .map_err(|e| NotedError::EncryptionError(e.to_string()))?;
-                            Some(encrypted_key)
-                        };
-
-                        let mut config = Config::load()?;
-                        config.active_provider = Some("openai".to_string());
-                        config.openai = Some(OpenAIConfig {
-                            url,
-                            model,
-                            api_key,
-                        });
-                        config.save()?;
-                        println!("{}", "Config saved successfully.".green());
-                    }
-                    _ => unreachable!(),
-                }
-
-                // notion
-                let is_notion = Confirm::with_theme(&ColorfulTheme::default())
-                    .with_prompt("Do you want to configure Notion to save your notes there?")
-                    .interact()?;
-
-                if is_notion {
-                    let api_key_str = Password::with_theme(&ColorfulTheme::default())
-                        .with_prompt("Enter your Notion API key: ")
+                
+                loop {
+                    let selected_option = Select::with_theme(&ColorfulTheme::default())
+                        .with_prompt("What would you like to configure?")
+                        .items(&config_options)
+                        .default(0)
                         .interact()?;
 
-                    // Encrypt the API key
-                    let api_key = EncryptionData::new(&api_key_str, &master_password)
-                        .map_err(|e| NotedError::EncryptionError(e.to_string()))?;
+                    match selected_option {
+                        0 => {
+                            // Configure AI Provider
+                            let providers = vec![
+                                "Gemini API (Cloud-based, requires API key)",
+                                "Claude API (Cloud-based, requires API key)",
+                                "Ollama (Local, requires Ollama to be set up)",
+                                "OpenAI Compatible API (Cloud/Local, works with LM Studio)",
+                            ];
+                            let selected_provider = Select::with_theme(&ColorfulTheme::default())
+                                .with_prompt("Choose your AI provider")
+                                .items(&providers)
+                                .default(0)
+                                .interact()?;
 
-                    let database_id = Password::with_theme(&ColorfulTheme::default())
-                        .with_prompt("Enter your Notion Database ID: ")
-                        .interact()?;
+                            match selected_provider {
+                                0 => {
+                                    let mut config = Config::load()?;
+                                    let api_key = Password::with_theme(&ColorfulTheme::default())
+                                        .with_prompt("Enter your Gemini API key: ")
+                                        .interact()?;
 
-                    let spinner = ProgressBar::new_spinner();
-                    spinner.set_style(
-                        ProgressStyle::default_spinner()
-                            .template("{spinner:.cyan} {msg}")
-                            .unwrap(),
-                    );
-                    spinner.set_message("Fetching Notion database schema...");
-                    spinner.enable_steady_tick(std::time::Duration::from_millis(100));
+                                    // Encrypt the API key
+                                    let encrypted_key = EncryptionData::new(&api_key, &master_password)
+                                        .map_err(|e| NotedError::EncryptionError(e.to_string()))?;
 
-                    // Create a NotionClient with the API key (already decrypted from user input)
-                    let client = NotionClient::new(api_key_str.clone(), database_id.clone());
-                    let schema_result = client.get_database_schema().await;
-                    spinner.finish_and_clear();
-                    match schema_result {
-                        Ok(schema) => {
-                            let title_property_name = schema
-                                .properties
-                                .values()
-                                .find(|prop| {
-                                    matches!(prop.type_specific_config, PropertyType::Title(_))
-                                })
-                                .map(|prop| prop.name.clone())
-                                .ok_or_else(|| {
-                                    NotedError::ApiError(format!(
-                                        "{}",
-                                        "Database has no title property".red()
-                                    ))
-                                })?;
+                                    config.active_provider = Some("gemini".to_string());
+                                    config.gemini = Some(GeminiConfig {
+                                        api_key: encrypted_key,
+                                    });
+                                    config.save()?;
+                                    println!("{}", "Gemini API configured successfully.".green());
+                                }
+                                1 => {
+                                    let mut config = Config::load()?;
+                                    let api_key = Password::with_theme(&ColorfulTheme::default())
+                                        .with_prompt("Enter your Claude API key: ")
+                                        .interact()?;
 
-                            let properties: Vec<_> = schema
-                                .properties
-                                .into_iter()
-                                .filter(|(_name, property)| {
-                                    matches!(
-                                        &property.type_specific_config,
-                                        PropertyType::Select { .. }
-                                            | PropertyType::MultiSelect { .. }
-                                            | PropertyType::RichText(_)
-                                            | PropertyType::Number(_)
-                                            | PropertyType::Date(_)
-                                            | PropertyType::Checkbox(_)
-                                    )
-                                })
-                                .collect();
+                                    // Encrypt the API key
+                                    let encrypted_key = EncryptionData::new(&api_key, &master_password)
+                                        .map_err(|e| NotedError::EncryptionError(e.to_string()))?;
 
-                            let mut default_properties = Vec::new();
-                            if properties.is_empty() {
-                                println!(
-                                    "{}",
-                                    "No user configurable properties found in this database."
-                                        .yellow()
-                                );
-                            } else {
-                                println!("Enter the default values for the following properties: ");
+                                    config.active_provider = Some("claude".to_string());
+                                    let anthropic_models = vec![
+                                        "    claude-opus-4-20250514",
+                                        "    claude-sonnet-4-20250514",
+                                        "    claude-3-7-sonnet-20250219",
+                                        "    claude-3-5-haiku-20241022",
+                                        "    claude-3-5-sonnet-20241022",
+                                        "    Other",
+                                    ];
+                                    let selected_model = Select::with_theme(&ColorfulTheme::default())
+                                        .with_prompt("Choose your Claude model:")
+                                        .items(&anthropic_models)
+                                        .default(0)
+                                        .interact()?;
+
+                                    let model = if selected_model == anthropic_models.len() - 1 {
+                                        Input::with_theme(&ColorfulTheme::default())
+                                            .with_prompt("Enter the custom model name:")
+                                            .interact_text()?
+                                    } else {
+                                        anthropic_models[selected_model].trim().to_string()
+                                    };
+
+                                    config.claude = Some(ClaudeConfig {
+                                        api_key: encrypted_key,
+                                        model,
+                                    });
+                                    config.save()?;
+                                    println!("{}", "Claude API configured successfully.".green());
+                                }
+                                2 => {
+                                    let url = Input::with_theme(&ColorfulTheme::default())
+                                        .with_prompt("Ollama server url")
+                                        .default("http://localhost:11434".to_string())
+                                        .interact_text()?;
+
+                                    let model = Input::with_theme(&ColorfulTheme::default())
+                                        .with_prompt("Ollama model")
+                                        .default("gemma3:27b".to_string())
+                                        .interact_text()?;
+
+                                    let mut config = Config::load()?;
+                                    config.active_provider = Some("ollama".to_string());
+                                    config.ollama = Some(OllamaConfig { url, model });
+                                    config.save()?;
+                                    println!("{}", "Ollama configured successfully.".green());
+                                }
+                                3 => {
+                                    let url = Input::with_theme(&ColorfulTheme::default())
+                                        .with_prompt("Server url")
+                                        .default("http://localhost:1234".to_string())
+                                        .interact_text()?;
+
+                                    let model = Input::with_theme(&ColorfulTheme::default())
+                                        .with_prompt("Model")
+                                        .default("gemma3:27b".to_string())
+                                        .interact_text()?;
+
+                                    let api_key_str = Password::with_theme(&ColorfulTheme::default())
+                                        .with_prompt("Enter your API key (Optional, press Enter if none): ")
+                                        .allow_empty_password(true)
+                                        .interact()?;
+
+                                    let api_key = if api_key_str.is_empty() {
+                                        None
+                                    } else {
+                                        // Encrypt the API key if provided
+                                        let encrypted_key = EncryptionData::new(&api_key_str, &master_password)
+                                            .map_err(|e| NotedError::EncryptionError(e.to_string()))?;
+                                        Some(encrypted_key)
+                                    };
+
+                                    let mut config = Config::load()?;
+                                    config.active_provider = Some("openai".to_string());
+                                    config.openai = Some(OpenAIConfig {
+                                        url,
+                                        model,
+                                        api_key,
+                                    });
+                                    config.save()?;
+                                    println!("{}", "OpenAI Compatible API configured successfully.".green());
+                                }
+                                _ => unreachable!(),
                             }
-                            for (name, property) in &properties {
-                                match &property.type_specific_config {
-                                    PropertyType::MultiSelect { multi_select } => {
-                                        let options: Vec<_> = multi_select
-                                            .options
-                                            .iter()
-                                            .map(|option| option.name.clone())
-                                            .collect();
+                        }
+                        1 => {
+                            // Configure Storage Provider
+                            let storage_providers = vec![
+                                "Notion (Save to Notion database)",
+                            ];
+                            
+                            let selected_storage = Select::with_theme(&ColorfulTheme::default())
+                                .with_prompt("Choose a storage provider to configure")
+                                .items(&storage_providers)
+                                .interact()?;
 
-                                        let selections =
-                                            MultiSelect::with_theme(&ColorfulTheme::default())
-                                                .with_prompt(format!(
-                                                    "Select default options for '{name}' (press Space to select and Enter to confirm)"
-                                                ))
-                                                .items(&options)
-                                                .interact()?;
-                                        let selected_names: Vec<String> = selections
-                                            .iter()
-                                            .map(|&i| options[i].clone())
-                                            .collect();
-                                        let prop_config = config::NotionPropertyConfig {
-                                            name: name.clone(),
-                                            property_type: "multi_select".to_string(),
-                                            default_value: serde_json::json!(selected_names),
-                                        };
-                                        default_properties.push(prop_config);
-                                    }
-                                    PropertyType::Select { select } => {
-                                        let options: Vec<_> = select
-                                            .options
-                                            .iter()
-                                            .map(|option| option.name.clone())
-                                            .collect();
-                                        let selection = Select::with_theme(&ColorfulTheme::default())
-                                                .with_prompt(format!("Select default option for '{name}' (Select and Enter to confirm)"))
-                                                .items(&options)
-                                                .interact()?;
-                                        let selected_name = options[selection].clone();
-                                        let prop_config = config::NotionPropertyConfig {
-                                            name: name.clone(),
-                                            property_type: "select".to_string(),
-                                            default_value: serde_json::json!(selected_name),
-                                        };
-                                        default_properties.push(prop_config);
-                                    }
-                                    PropertyType::RichText(_) => {
-                                        let default_value: String =
-                                            Input::with_theme(&ColorfulTheme::default())
-                                                .with_prompt(format!("Default text for '{name}'"))
-                                                .interact_text()?;
-                                        let prop_config = config::NotionPropertyConfig {
-                                            name: name.clone(),
-                                            property_type: "rich_text".to_string(),
-                                            default_value: serde_json::json!(default_value),
-                                        };
-                                        default_properties.push(prop_config);
-                                    }
-                                    PropertyType::Checkbox(_) => {
-                                        let checked =
-                                            Confirm::with_theme(&ColorfulTheme::default())
-                                                .with_prompt(format!(
-                                                    "Should '{name}' be checked by default?"
-                                                ))
-                                                .interact()?;
-                                        let prop_config = config::NotionPropertyConfig {
-                                            name: name.clone(),
-                                            property_type: "checkbox".to_string(),
-                                            default_value: serde_json::json!(checked),
-                                        };
-                                        default_properties.push(prop_config);
-                                    }
+                            match selected_storage {
+                                0 => {
+                                    // Configure Notion
+                                    let api_key_str = Password::with_theme(&ColorfulTheme::default())
+                                        .with_prompt("Enter your Notion API key: ")
+                                        .interact()?;
 
-                                    PropertyType::Date(_) => {
-                                        let default_value: String =
-                                            Input::with_theme(&ColorfulTheme::default())
-                                                .with_prompt(format!(
-                                                    "Default date for '{name}' (YYYY-MM-DD)"
-                                                ))
-                                                .interact_text()?;
-                                        let prop_config = config::NotionPropertyConfig {
-                                            name: name.clone(),
-                                            property_type: "date".to_string(),
-                                            default_value: serde_json::json!(default_value),
-                                        };
-                                        default_properties.push(prop_config);
-                                    }
+                                    // Encrypt the API key
+                                    let api_key = EncryptionData::new(&api_key_str, &master_password)
+                                        .map_err(|e| NotedError::EncryptionError(e.to_string()))?;
 
-                                    PropertyType::Number(_) => {
-                                        let default_value: f64 =
-                                            Input::with_theme(&ColorfulTheme::default())
-                                                .with_prompt(format!("Default number for '{name}'"))
-                                                .interact()?;
-                                        let prop_config = config::NotionPropertyConfig {
-                                            name: name.clone(),
-                                            property_type: "number".to_string(),
-                                            default_value: serde_json::json!(default_value),
-                                        };
+                                    let database_id = Password::with_theme(&ColorfulTheme::default())
+                                        .with_prompt("Enter your Notion Database ID: ")
+                                        .interact()?;
 
-                                        default_properties.push(prop_config);
-                                    }
-                                    _ => {
-                                        println!(
-                                            "{} Property '{}' is not supported for default configuration.",
-                                            "✖".red(),
-                                            name
-                                        );
+                                    let spinner = ProgressBar::new_spinner();
+                                    spinner.set_style(
+                                        ProgressStyle::default_spinner()
+                                            .template("{spinner:.cyan} {msg}")
+                                            .unwrap(),
+                                    );
+                                    spinner.set_message("Fetching Notion database schema...");
+                                    spinner.enable_steady_tick(std::time::Duration::from_millis(100));
+
+                                    // Create a NotionClient with the API key (already decrypted from user input)
+                                    let client = crate::storage::notion_storage::NotionStorage::new(
+                                        api_key_str.clone(),
+                                        database_id.clone(),
+                                        String::new(),
+                                        Vec::new(),
+                                    );
+                                    let schema_result = client.get_database_schema().await;
+                                    spinner.finish_and_clear();
+                                    
+                                    match schema_result {
+                                        Ok(schema) => {
+                                            let title_property_name = schema
+                                                .properties
+                                                .values()
+                                                .find(|prop| {
+                                                    matches!(prop.type_specific_config, crate::storage::notion_storage::PropertyType::Title(_))
+                                                })
+                                                .map(|prop| prop.name.clone())
+                                                .ok_or_else(|| {
+                                                    NotedError::ApiError(format!(
+                                                        "{}",
+                                                        "Database has no title property".red()
+                                                    ))
+                                                })?;
+
+                                            let properties: Vec<_> = schema
+                                                .properties
+                                                .into_iter()
+                                                .filter(|(_name, property)| {
+                                                    matches!(
+                                                        &property.type_specific_config,
+                                                        crate::storage::notion_storage::PropertyType::Select { .. }
+                                                            | crate::storage::notion_storage::PropertyType::MultiSelect { .. }
+                                                            | crate::storage::notion_storage::PropertyType::RichText(_)
+                                                            | crate::storage::notion_storage::PropertyType::Number(_)
+                                                            | crate::storage::notion_storage::PropertyType::Date(_)
+                                                            | crate::storage::notion_storage::PropertyType::Checkbox(_)
+                                                    )
+                                                })
+                                                .collect();
+
+                                            let mut default_properties = Vec::new();
+                                            if properties.is_empty() {
+                                                println!(
+                                                    "{}",
+                                                    "No user configurable properties found in this database."
+                                                        .yellow()
+                                                );
+                                            } else {
+                                                println!("Enter the default values for the following properties: ");
+                                            }
+                                            for (name, property) in &properties {
+                                                match &property.type_specific_config {
+                                                    crate::storage::notion_storage::PropertyType::MultiSelect { multi_select } => {
+                                                        let options: Vec<_> = multi_select
+                                                            .options
+                                                            .iter()
+                                                            .map(|option| option.name.clone())
+                                                            .collect();
+
+                                                        let selections =
+                                                            MultiSelect::with_theme(&ColorfulTheme::default())
+                                                                .with_prompt(format!(
+                                                                    "Select default options for '{name}' (press Space to select and Enter to confirm)"
+                                                                ))
+                                                                .items(&options)
+                                                                .interact()?;
+                                                        let selected_names: Vec<String> = selections
+                                                            .iter()
+                                                            .map(|&i| options[i].clone())
+                                                            .collect();
+                                                        let prop_config = config::NotionPropertyConfig {
+                                                            name: name.clone(),
+                                                            property_type: "multi_select".to_string(),
+                                                            default_value: serde_json::json!(selected_names),
+                                                        };
+                                                        default_properties.push(prop_config);
+                                                    }
+                                                    crate::storage::notion_storage::PropertyType::Select { select } => {
+                                                        let options: Vec<_> = select
+                                                            .options
+                                                            .iter()
+                                                            .map(|option| option.name.clone())
+                                                            .collect();
+                                                        let selection = Select::with_theme(&ColorfulTheme::default())
+                                                                .with_prompt(format!("Select default option for '{name}' (Select and Enter to confirm)"))
+                                                                .items(&options)
+                                                                .interact()?;
+                                                        let selected_name = options[selection].clone();
+                                                        let prop_config = config::NotionPropertyConfig {
+                                                            name: name.clone(),
+                                                            property_type: "select".to_string(),
+                                                            default_value: serde_json::json!(selected_name),
+                                                        };
+                                                        default_properties.push(prop_config);
+                                                    }
+                                                    crate::storage::notion_storage::PropertyType::RichText(_) => {
+                                                        let default_value: String =
+                                                            Input::with_theme(&ColorfulTheme::default())
+                                                                .with_prompt(format!("Default text for '{name}'"))
+                                                                .interact_text()?;
+                                                        let prop_config = config::NotionPropertyConfig {
+                                                            name: name.clone(),
+                                                            property_type: "rich_text".to_string(),
+                                                            default_value: serde_json::json!(default_value),
+                                                        };
+                                                        default_properties.push(prop_config);
+                                                    }
+                                                    crate::storage::notion_storage::PropertyType::Checkbox(_) => {
+                                                        let checked =
+                                                            Confirm::with_theme(&ColorfulTheme::default())
+                                                                .with_prompt(format!(
+                                                                    "Should '{name}' be checked by default?"
+                                                                ))
+                                                                .interact()?;
+                                                        let prop_config = config::NotionPropertyConfig {
+                                                            name: name.clone(),
+                                                            property_type: "checkbox".to_string(),
+                                                            default_value: serde_json::json!(checked),
+                                                        };
+                                                        default_properties.push(prop_config);
+                                                    }
+
+                                                    crate::storage::notion_storage::PropertyType::Date(_) => {
+                                                        let default_value: String =
+                                                            Input::with_theme(&ColorfulTheme::default())
+                                                                .with_prompt(format!(
+                                                                    "Default date for '{name}' (YYYY-MM-DD)"
+                                                                ))
+                                                                .interact_text()?;
+                                                        let prop_config = config::NotionPropertyConfig {
+                                                            name: name.clone(),
+                                                            property_type: "date".to_string(),
+                                                            default_value: serde_json::json!(default_value),
+                                                        };
+                                                        default_properties.push(prop_config);
+                                                    }
+
+                                                    crate::storage::notion_storage::PropertyType::Number(_) => {
+                                                        let default_value: f64 =
+                                                            Input::with_theme(&ColorfulTheme::default())
+                                                                .with_prompt(format!("Default number for '{name}'"))
+                                                                .interact()?;
+                                                        let prop_config = config::NotionPropertyConfig {
+                                                            name: name.clone(),
+                                                            property_type: "number".to_string(),
+                                                            default_value: serde_json::json!(default_value),
+                                                        };
+
+                                                        default_properties.push(prop_config);
+                                                    }
+                                                    _ => {
+                                                        println!(
+                                                            "{} Property '{}' is not supported for default configuration.",
+                                                            "✖".red(),
+                                                            name
+                                                        );
+                                                    }
+                                                }
+                                            }
+
+                                            let mut config = Config::load()?;
+                                            config.notion = Some(NotionConfig {
+                                                api_key,
+                                                database_id,
+                                                title_property_name,
+                                                properties: default_properties,
+                                            });
+                                            config.save()?;
+                                            println!("{}", "Notion storage provider configured successfully.".green());
+                                        }
+                                        Err(e) => eprintln!("{e}"),
                                     }
                                 }
+                                _ => unreachable!(),
                             }
-
-                            let mut config = Config::load()?;
-                            config.notion = Some(NotionConfig {
-                                api_key,
-                                database_id,
-                                title_property_name,
-                                properties: default_properties,
-                            });
-                            config.save()?;
                         }
-                        Err(e) => eprintln!("{e}"),
+                        2 => {
+                            // Exit
+                            break;
+                        }
+                        _ => unreachable!(),
                     }
                 }
+                
                 println!(
                     "{}",
-                    "You can now run 'notedmd convert <file>' to convert your files.".cyan()
+                    "Configuration complete! You can now run 'notedmd convert <file>' to convert your files.".cyan()
+                );
+                println!(
+                    "{}",
+                    "Use --storage notion to save to Notion or --storage file (default) for local files.".cyan()
                 );
             }
 
@@ -894,7 +901,7 @@ async fn run() -> Result<(), NotedError> {
             output,
             api_key,
             prompt,
-            notion,
+            storage,
         } => {
             let config = Config::load()?;
 
@@ -905,6 +912,9 @@ async fn run() -> Result<(), NotedError> {
             let master_password = ensure_master_password(true)
                 .await?
                 .ok_or(NotedError::MasterPasswordRequired)?;
+
+            // Create storage provider
+            let storage_provider = create_storage_provider(&storage, &config, Some(&master_password))?;
 
             let (client, model_info, api_key): (Box<dyn AiProvider>, String, String) =
                 match config.active_provider.as_deref() {
@@ -997,22 +1007,6 @@ async fn run() -> Result<(), NotedError> {
                     format!("Input path not found: {path}"),
                 )));
             }
-            let (notion_client, notion_config) = if notion {
-                if let Some(config) = &config.notion {
-                    // Decrypt the Notion API key
-                    let decrypted_api_key = config
-                        .api_key
-                        .decrypt(&master_password)
-                        .map_err(|e| NotedError::EncryptionError(e.to_string()))?;
-
-                    let client = NotionClient::new(decrypted_api_key, config.database_id.clone());
-                    (Some(client), Some(config))
-                } else {
-                    return Err(NotedError::NotionNotConfigured);
-                }
-            } else {
-                (None, None)
-            };
 
             if input_path.is_dir() {
                 let files_to_convert: Vec<_> = std::fs::read_dir(input_path)?
@@ -1056,13 +1050,12 @@ async fn run() -> Result<(), NotedError> {
                         .await
                         {
                             Ok(markdown) => {
-                                if let Err(e) = save_file_and_notion(
+                                if let Err(e) = store_content_with_provider(
                                     file_path_str,
                                     &markdown,
                                     output.as_deref(),
                                     &progress_bar,
-                                    notion_client.as_ref(),
-                                    notion_config,
+                                    storage_provider.as_ref(),
                                 )
                                 .await
                                 {
@@ -1102,13 +1095,12 @@ async fn run() -> Result<(), NotedError> {
                 .await
                 {
                     Ok(markdown) => {
-                        if let Err(e) = save_file_and_notion(
+                        if let Err(e) = store_content_with_provider(
                             path_str,
                             &markdown,
                             output.as_deref(),
                             &progress_bar,
-                            notion_client.as_ref(),
-                            notion_config,
+                            storage_provider.as_ref(),
                         )
                         .await
                         {

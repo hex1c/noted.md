@@ -47,9 +47,6 @@ pub enum NotedError {
     #[error(" Claude is not configured properly. Please run 'notedmd config --edit' to set it up.")]
     ClaudeNotConfigured,
 
-    #[error(" Notion is not configured properly. Please run 'notedmd config --edit' to set it up.")]
-    NotionNotConfigured,
-
     #[error(
         " OpenAI/LM Studio is not configured properly. Please run 'notedmd config --edit' to set it up."
     )]
@@ -72,4 +69,10 @@ pub enum NotedError {
 
     #[error(" Configuration needs migration: {0}")]
     MigrationRequired(String),
+
+    #[error(" Configuration error: {0}")]
+    ConfigurationError(String),
+
+    #[error(" Invalid input: {0}")]
+    InvalidInput(String),
 }

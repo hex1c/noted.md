@@ -34,9 +34,14 @@ pub enum Commands {
         #[arg(short, long, help = "Add a custom prompt to pass to the LLM")]
         prompt: Option<String>,
 
-        /// Notion Support
-        #[arg(short, long, help = "Use Notion to store the generated output")]
-        notion: bool,
+        /// Storage provider to use (file, notion)
+        #[arg(
+            short,
+            long,
+            help = "Storage provider to use. Options: file (default), notion",
+            default_value = "file"
+        )]
+        storage: String,
     },
 
     /// Configure notedmd settings

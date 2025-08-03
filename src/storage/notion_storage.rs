@@ -1,13 +1,13 @@
+use async_trait::async_trait;
 use std::collections::HashMap;
-
 use anyhow::Result;
 use colored::Colorize;
 use comrak::Arena;
 use notion_client::objects::block::Block;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-
 use crate::{config, error::NotedError, notion::converter};
+use super::{FileMetadata, StorageProvider};
 
 // Request structs
 #[derive(Serialize)]
@@ -106,19 +106,28 @@ pub struct NotionError {
     pub message: String,
 }
 
-// Client
-pub struct NotionClient {
+// Storage Provider Implementation
+pub struct NotionStorage {
     client: Client,
     api_key: String,
     database_id: String,
+    title_property_name: String,
+    properties: Vec<config::NotionPropertyConfig>,
 }
 
-impl NotionClient {
-    pub fn new(api_key: String, database_id: String) -> Self {
+impl NotionStorage {
+    pub fn new(
+        api_key: String,
+        database_id: String,
+        title_property_name: String,
+        properties: Vec<config::NotionPropertyConfig>,
+    ) -> Self {
         Self {
             client: Client::new(),
             api_key,
             database_id,
+            title_property_name,
+            properties,
         }
     }
 
@@ -149,21 +158,27 @@ impl NotionClient {
         }
     }
 
-    pub async fn create_notion_page(
+    async fn create_notion_page(
         &self,
         title: &str,
-        title_property_name: &str,
-        properties: &[config::NotionPropertyConfig],
         markdown_content: &str,
     ) -> Result<NotionResponse, NotedError> {
         let url = "https://api.notion.com/v1/pages";
-        let arena = Arena::new();
-        let blocks = converter::Converter::run(markdown_content, &arena)
-            .map_err(|e| NotedError::ApiError(e.to_string()))?;
+        
+        // Convert markdown to Notion blocks in a non-async context
+        let blocks = tokio::task::spawn_blocking({
+            let markdown_content = markdown_content.to_string();
+            move || {
+                let arena = Arena::new();
+                converter::Converter::run(&markdown_content, &arena)
+            }
+        }).await
+        .map_err(|e| NotedError::ApiError(format!("Task join error: {e}")))?
+        .map_err(|e| NotedError::ApiError(e.to_string()))?;
 
         let mut props_map = serde_json::Map::new();
         props_map.insert(
-            title_property_name.to_string(),
+            self.title_property_name.clone(),
             serde_json::json!(
             {
                 "title": [
@@ -176,7 +191,7 @@ impl NotionClient {
             }),
         );
 
-        for prop_config in properties {
+        for prop_config in &self.properties {
             let prop_name = &prop_config.name;
             let prop_type = &prop_config.property_type;
             let prop_value = &prop_config.default_value;
@@ -245,9 +260,9 @@ impl NotionClient {
         let response_body = response.text().await?;
 
         if status.is_success() {
-            let notion_reponse: NotionResponse = serde_json::from_str(&response_body)
+            let notion_response: NotionResponse = serde_json::from_str(&response_body)
                 .map_err(|e| NotedError::ResponseDecodeError(e.to_string()))?;
-            Ok(notion_reponse)
+            Ok(notion_response)
         } else {
             let error_response: NotionError = serde_json::from_str(&response_body)
                 .map_err(|e| NotedError::ResponseDecodeError(e.to_string()))?;
@@ -256,5 +271,26 @@ impl NotionClient {
                 status, error_response.message
             )))
         }
+    }
+}
+
+#[async_trait]
+impl StorageProvider for NotionStorage {
+    async fn store(&self, content: &str, metadata: &FileMetadata) -> Result<String, NotedError> {
+        let page = self.create_notion_page(&metadata.title, content).await?;
+        Ok(page.url)
+    }
+
+    fn provider_name(&self) -> &'static str {
+        "Notion"
+    }
+
+    fn can_handle_content(&self, content: &str) -> Result<(), NotedError> {
+        if content.trim().is_empty() {
+            return Err(NotedError::InvalidInput(
+                "Content cannot be empty for Notion storage".to_string(),
+            ));
+        }
+        Ok(())
     }
 }
