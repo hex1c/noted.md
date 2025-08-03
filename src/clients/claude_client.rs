@@ -1,8 +1,8 @@
 use crate::ai_provider::AiProvider;
 use crate::error::NotedError;
-use crate::file_utils::FileData;
+use crate::file_utils::{DocumentFormat, FileData, FileType, ImageFormat};
 use async_trait::async_trait;
-use reqwest::{Client, StatusCode};
+use reqwest::{Client, Request, Response, StatusCode};
 use serde::{Deserialize, Serialize};
 
 // Request structs
@@ -60,41 +60,76 @@ pub struct ContentResponse {
 // Client
 pub struct ClaudeClient {
     client: Client,
-    api_key: String,
-    model: String,
-    prompt: Option<String>,
+}
+
+impl Default for ClaudeClient {
+    fn default() -> Self {
+        Self {
+            client: Client::new(),
+        }
+    }
 }
 
 impl ClaudeClient {
-    pub fn new(api_key: String, model: String, prompt: Option<String>) -> Self {
-        Self {
-            client: Client::new(),
-            api_key,
-            model,
-            prompt,
-        }
+    pub fn new() -> Self {
+        Self::default()
     }
 }
 
 #[async_trait]
 impl AiProvider for ClaudeClient {
-    async fn send_request(&self, file_data: FileData) -> Result<String, NotedError> {
-        let url = "https://api.anthropic.com/v1/messages".to_string();
+    fn get_default_prompt(&self) -> String {
+        "Take the handwritten notes from this image and convert them into a clean, well-structured Markdown file. Pay attention to headings, lists, and any other formatting. Resemble the hierarchy. Use latex for mathematical equations. For latex use the $$ syntax instead of ```latex. Do not skip anything from the original text. The output should be suitable for use in Obsidian. Just give me the markdown, do not include other text in the response apart from the markdown file. No explanation on how the changes were made is needed".to_string()
+    }
 
-        let prompt = if let Some(custom_prompt) = &self.prompt {
-            custom_prompt.clone()
-        } else {
-            "Take the handwritten notes from this image and convert them into a clean, well-structured Markdown file. Pay attention to headings, lists, and any other formatting. Resemble the hierarchy. Use latex for mathematical equations. For latex use the $$ syntax instead of ```latex. Do not skip anything from the original text. The output should be suitable for use in Obsidian. Just give me the markdown, do not include other text in the response apart from the markdown file. No explanation on how the changes were made is needed".to_string()
-        };
+    fn get_url(&self) -> String {
+        "https://api.anthropic.com/v1/messages".to_string()
+    }
 
-        let file_type = if file_data.mime_type == "application/pdf" {
-            "document".to_string()
-        } else {
-            "image".to_string()
+    fn get_default_headers(&self) -> Vec<(String, String)> {
+        vec![
+            ("anthropic-version".to_string(), "2023-06-01".to_string()),
+            ("content-type".to_string(), "application/json".to_string()),
+        ]
+    }
+
+    fn can_handle_file(&self, file_data: &FileData) -> Result<(), NotedError> {
+        const MAX_SIZE_MB: u64 = 32;
+        const MAX_SIZE_BYTES: u64 = MAX_SIZE_MB * 1024 * 1024;
+
+        if file_data.file_size > MAX_SIZE_BYTES {
+            return Err(NotedError::FileSizeExceeded(
+                file_data.file_size / (1024 * 1024),
+                MAX_SIZE_MB,
+            ));
+        }
+
+        match &file_data.file_type {
+            FileType::Image(format) => match format {
+                ImageFormat::Png | ImageFormat::Jpeg | ImageFormat::Gif | ImageFormat::WebP => {
+                    Ok(())
+                }
+            },
+            FileType::Document(format) => match format {
+                DocumentFormat::Pdf => Ok(()),
+            },
+        }
+    }
+
+    fn build_request(
+        &self,
+        model_info: &str,
+        api_key: &str,
+        file_data: &FileData,
+        prompt: String,
+    ) -> Result<Request, NotedError> {
+        let file_type = match &file_data.file_type {
+            FileType::Document(_) => "document".to_string(),
+            FileType::Image(_) => "image".to_string(),
         };
 
         let request_body = ClaudeRequest {
-            model: self.model.clone(),
+            model: model_info.to_string(),
             max_tokens: 4096,
             messages: vec![Message {
                 role: "user".to_string(),
@@ -104,8 +139,8 @@ impl AiProvider for ClaudeClient {
                         text: None,
                         source: Some(Source {
                             source_type: "base64".to_string(),
-                            media_type: file_data.mime_type,
-                            data: file_data.encoded_data,
+                            media_type: file_data.mime_type.clone(),
+                            data: file_data.encoded_data.clone(),
                         }),
                     },
                     Content {
@@ -117,32 +152,30 @@ impl AiProvider for ClaudeClient {
             }],
         };
 
-        let response = self
-            .client
-            .post(&url)
-            .header("x-api-key", &self.api_key)
-            .header("anthropic-version", "2023-06-01")
+        let mut request = self.client.post(self.get_url());
+        for (key, value) in self.get_default_headers() {
+            request = request.header(key, value);
+        }
+        request
+            .header("x-api-key", api_key)
             .json(&request_body)
-            .send()
-            .await?;
+            .build()
+            .map_err(NotedError::NetworkError)
+    }
 
+    async fn handle_response(&self, response: Response) -> Result<String, NotedError> {
         let status = response.status();
-        let response_body = response.text().await?;
 
         if status != StatusCode::OK {
-            if status == StatusCode::UNAUTHORIZED {
-                return Err(NotedError::InvalidApiKey);
-            }
-            let error_response: Result<ClaudeResponse, _> = serde_json::from_str(&response_body);
-            if let Ok(err_resp) = error_response {
-                if let Some(error) = err_resp.error {
-                    return Err(NotedError::ApiError(error.message));
-                }
-            }
-            return Err(NotedError::ApiError(format!(
-                "Received status code: {status}"
-            )));
+            return match status {
+                StatusCode::UNAUTHORIZED => Err(NotedError::InvalidApiKey),
+                _ => Err(NotedError::ApiError(format!(
+                    "Received status code: {status}"
+                ))),
+            };
         }
+
+        let response_body = response.text().await?;
 
         let claude_response: ClaudeResponse = serde_json::from_str(&response_body)
             .map_err(|e| NotedError::ResponseDecodeError(e.to_string()))?;

@@ -65,17 +65,20 @@ pub enum Commands {
         #[arg(long, help = "Edit the configuration file")]
         edit: bool,
     },
-    
+
     /// Security configuration
     Security {
         /// Change the master password used for encrypting sensitive data
-        #[arg(long, help = "Change the master password used for encrypting sensitive data")]
+        #[arg(
+            long,
+            help = "Change the master password used for encrypting sensitive data"
+        )]
         change_master_password: bool,
-        
+
         /// Reset the master password and all encrypted data
         #[arg(long, help = "Reset the master password and all encrypted data")]
         reset: bool,
-        
+
         /// Migrate from plaintext to encrypted configuration
         #[arg(long, help = "Migrate from plaintext to encrypted configuration")]
         migrate: bool,

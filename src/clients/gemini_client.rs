@@ -1,8 +1,8 @@
 use crate::ai_provider::AiProvider;
 use crate::error::NotedError;
-use crate::file_utils::FileData;
+use crate::file_utils::{DocumentFormat, FileData, FileType, ImageFormat};
 use async_trait::async_trait;
-use reqwest::{Client, StatusCode};
+use reqwest::{Client, Request, Response, StatusCode};
 use serde::{Deserialize, Serialize};
 
 // Request structs
@@ -65,33 +65,70 @@ pub struct PartResponse {
 // Client
 pub struct GeminiClient {
     client: Client,
-    api_key: String,
-    prompt: Option<String>,
+}
+
+impl Default for GeminiClient {
+    fn default() -> Self {
+        Self {
+            client: Client::new(),
+        }
+    }
 }
 
 impl GeminiClient {
-    pub fn new(api_key: String, prompt: Option<String>) -> Self {
-        Self {
-            client: Client::new(),
-            api_key,
-            prompt,
-        }
+    pub fn new() -> Self {
+        Self::default()
     }
 }
 
 #[async_trait]
 impl AiProvider for GeminiClient {
-    async fn send_request(&self, file_data: FileData) -> Result<String, NotedError> {
-        let url = format!(
-            "https://generativelanguage.googleapis.com/v1beta/models/gemma-3-27b-it:generateContent?key={}",
-            self.api_key
-        );
+    fn get_default_prompt(&self) -> String {
+        "Take the handwritten notes from this image and convert them into a clean, well-structured Markdown file. Pay attention to headings, lists, and any other formatting. Resemble the hierarchy. Use latex for mathematical equations. For latex use the $$ syntax instead of ```latex. Do not skip anything from the original text. The output should be suitable for use in Obsidian. Just give me the markdown, do not include other text in the response apart from the markdown file. No explanation on how the changes were made is needed".to_string()
+    }
 
-        let prompt = if let Some(custom_prompt) = &self.prompt {
-            custom_prompt.clone()
-        } else {
-            "Take the handwritten notes from this image and convert them into a clean, well-structured Markdown file. Pay attention to headings, lists, and any other formatting. Resemble the hierarchy. Use latex for mathematical equations. For latex use the $$ syntax instead of ```latex. Do not skip anything from the original text. The output should be suitable for use in Obsidian. Just give me the markdown, do not include other text in the response apart from the markdown file. No explanation on how the changes were made is needed".to_string()
-        };
+    fn get_url(&self) -> String {
+        "https://generativelanguage.googleapis.com/v1beta/models/gemma-3-27b-it:generateContent"
+            .to_string()
+    }
+
+    fn get_default_headers(&self) -> Vec<(String, String)> {
+        vec![("content-type".to_string(), "application/json".to_string())]
+    }
+
+    fn can_handle_file(&self, file_data: &FileData) -> Result<(), NotedError> {
+        const MAX_SIZE_MB: u64 = 20;
+        const MAX_SIZE_BYTES: u64 = MAX_SIZE_MB * 1024 * 1024;
+
+        if file_data.file_size > MAX_SIZE_BYTES {
+            return Err(NotedError::FileSizeExceeded(
+                file_data.file_size / (1024 * 1024),
+                MAX_SIZE_MB,
+            ));
+        }
+
+        match &file_data.file_type {
+            FileType::Image(format) => match format {
+                ImageFormat::Png | ImageFormat::Jpeg | ImageFormat::WebP => Ok(()),
+                ImageFormat::Gif => Err(NotedError::UnsupportedFileTypeForProvider(
+                    "Gemini".to_string(),
+                    "GIF images".to_string(),
+                )),
+            },
+            FileType::Document(format) => match format {
+                DocumentFormat::Pdf => Ok(()),
+            },
+        }
+    }
+
+    fn build_request(
+        &self,
+        _model_info: &str, // Gemini uses fixed model in URL
+        api_key: &str,
+        file_data: &FileData,
+        prompt: String,
+    ) -> Result<Request, NotedError> {
+        let url = format!("{}?key={}", self.get_url(), api_key);
 
         let request_body = GeminiRequest {
             contents: vec![Content {
@@ -103,33 +140,41 @@ impl AiProvider for GeminiClient {
                     Part {
                         text: None,
                         inline_data: Some(InlineData {
-                            mime_type: file_data.mime_type,
-                            data: file_data.encoded_data,
+                            mime_type: file_data.mime_type.clone(),
+                            data: file_data.encoded_data.clone(),
                         }),
                     },
                 ],
             }],
         };
 
-        let response = self.client.post(&url).json(&request_body).send().await?;
+        let mut request = self.client.post(&url);
 
+        for (key, value) in self.get_default_headers() {
+            request = request.header(key, value);
+        }
+
+        let request = request
+            .json(&request_body)
+            .build()
+            .map_err(NotedError::NetworkError)?;
+
+        Ok(request)
+    }
+
+    async fn handle_response(&self, response: Response) -> Result<String, NotedError> {
         let status = response.status();
-        let response_body = response.text().await?;
 
         if status != StatusCode::OK {
-            if status == StatusCode::UNAUTHORIZED {
-                return Err(NotedError::InvalidApiKey);
-            }
-            let error_response: Result<GeminiResponse, _> = serde_json::from_str(&response_body);
-            if let Ok(err_resp) = error_response {
-                if let Some(error) = err_resp.error {
-                    return Err(NotedError::ApiError(error.message));
-                }
-            }
-            return Err(NotedError::ApiError(format!(
-                "Received status code: {status}"
-            )));
+            return match status {
+                StatusCode::UNAUTHORIZED => Err(NotedError::InvalidApiKey),
+                _ => Err(NotedError::ApiError(format!(
+                    "Received status code: {status}"
+                ))),
+            };
         }
+
+        let response_body = response.text().await?;
 
         let gemini_response: GeminiResponse = serde_json::from_str(&response_body)
             .map_err(|e| NotedError::ResponseDecodeError(e.to_string()))?;

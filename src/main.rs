@@ -36,14 +36,14 @@ use ui::{ascii_art, print_clean_config};
 
 use crate::config::get_config_path;
 
-async fn process_and_save_file(
+async fn process_file_with_ai(
     file_path: &str,
     client: &dyn AiProvider,
-    output_dir: Option<&str>,
+    model_info: &str,
+    api_key: &str,
+    custom_prompt: Option<String>,
     progress_bar: &ProgressBar,
-    notion_client: Option<&NotionClient>,
-    notion_config: Option<&NotionConfig>,
-) -> Result<(), NotedError> {
+) -> Result<String, NotedError> {
     let path = Path::new(file_path);
     let file_name = match path.file_name() {
         Some(name) => name,
@@ -64,10 +64,42 @@ async fn process_and_save_file(
         "File read successfully.".green()
     ));
 
+    // Check if the provider can handle this file type
+    client.can_handle_file(&file_data)?;
+
     progress_bar.set_message(format!("{}", "Sending to your AI model...".yellow()));
 
-    let markdown = client.send_request(file_data).await?;
+    let prompt = custom_prompt.unwrap_or_else(|| client.get_default_prompt());
+
+    // Build the request
+    let request = client.build_request(model_info, api_key, &file_data, prompt)?;
+
+    // Send the request using a connection pooled client
+    let http_client = reqwest::Client::new();
+    let response = http_client.execute(request).await?;
+
+    // Handle the response
+    let markdown = client.handle_response(response).await?;
     progress_bar.println(format!("{} {}", "✔".green(), "Received response.".green()));
+
+    Ok(markdown)
+}
+
+async fn save_file_and_notion(
+    file_path: &str,
+    markdown: &str,
+    output_dir: Option<&str>,
+    progress_bar: &ProgressBar,
+    notion_client: Option<&NotionClient>,
+    notion_config: Option<&NotionConfig>,
+) -> Result<(), NotedError> {
+    let path = Path::new(file_path);
+    let file_name = match path.file_name() {
+        Some(name) => name,
+        None => {
+            return Err(NotedError::FileNameError(file_path.to_string()));
+        }
+    };
 
     let output_path = match output_dir {
         Some(dir) => {
@@ -84,7 +116,7 @@ async fn process_and_save_file(
         None => path.with_extension("md").to_string_lossy().into_owned(),
     };
 
-    match std::fs::write(&output_path, &markdown) {
+    match std::fs::write(&output_path, markdown) {
         Ok(_) => {
             progress_bar.println(format!(
                 "{} {}",
@@ -97,7 +129,7 @@ async fn process_and_save_file(
                         file_name.to_string_lossy().into_owned().as_str(),
                         &config.title_property_name,
                         &config.properties,
-                        &markdown,
+                        markdown,
                     )
                     .await
                 {
@@ -127,17 +159,20 @@ async fn process_and_save_file(
 }
 
 /// Verify or set up the master password as needed
-async fn ensure_master_password(require_master_password: bool) -> Result<Option<String>, NotedError> {
+async fn ensure_master_password(
+    require_master_password: bool,
+) -> Result<Option<String>, NotedError> {
     if let Some(config_dir) = config::get_config_dir() {
         let master_password = MasterPassword::new(&config_dir);
-        
+
         // Check if master password is already set up
         if master_password.is_setup() {
             // If master password is set, prompt for it and verify
             let password = prompt_for_master_password(false)
                 .map_err(|e| NotedError::EncryptionError(e.to_string()))?;
-                
-            if master_password.verify(&password)
+
+            if master_password
+                .verify(&password)
                 .map_err(|e| NotedError::EncryptionError(e.to_string()))?
             {
                 return Ok(Some(password));
@@ -147,18 +182,19 @@ async fn ensure_master_password(require_master_password: bool) -> Result<Option<
         } else if require_master_password {
             // If master password is required but not set, prompt to set it up
             println!("{}", "No master password set. You need to set up a master password to secure your configuration.".yellow());
-            
+
             let password = prompt_for_master_password(true)
                 .map_err(|e| NotedError::EncryptionError(e.to_string()))?;
-                
-            master_password.setup(&password)
+
+            master_password
+                .setup(&password)
                 .map_err(|e| NotedError::EncryptionError(e.to_string()))?;
-                
+
             println!("{}", "Master password set up successfully.".green());
             return Ok(Some(password));
         }
     }
-    
+
     Ok(None)
 }
 
@@ -178,7 +214,11 @@ async fn run() -> Result<(), NotedError> {
     let mut config = Config::load()?;
 
     match args.command {
-        Commands::Security { change_master_password, reset, migrate } => {
+        Commands::Security {
+            change_master_password,
+            reset,
+            migrate,
+        } => {
             if reset {
                 println!("{}", "WARNING: This will reset your master password and all encrypted data will be lost.".red());
                 if Confirm::with_theme(&ColorfulTheme::default())
@@ -188,154 +228,202 @@ async fn run() -> Result<(), NotedError> {
                 {
                     if let Some(config_dir) = config::get_config_dir() {
                         let master_password = MasterPassword::new(&config_dir);
-                        master_password.reset()
+                        master_password
+                            .reset()
                             .map_err(|e| NotedError::EncryptionError(e.to_string()))?;
-                            
+
                         // Clear all encrypted fields
                         if let Some(gemini) = &mut config.gemini {
                             gemini.api_key = EncryptionData::default();
                         }
-                        
+
                         if let Some(claude) = &mut config.claude {
                             claude.api_key = EncryptionData::default();
                         }
-                        
+
                         if let Some(notion) = &mut config.notion {
                             notion.api_key = EncryptionData::default();
                         }
-                        
+
                         if let Some(openai) = &mut config.openai {
                             openai.api_key = None;
                         }
-                        
+
                         config.save()?;
-                        
-                        println!("{}", "Master password reset. All encrypted data has been cleared.".green());
+
+                        println!(
+                            "{}",
+                            "Master password reset. All encrypted data has been cleared.".green()
+                        );
                     }
                 }
             } else if change_master_password {
                 if let Some(config_dir) = config::get_config_dir() {
                     let master_password = MasterPassword::new(&config_dir);
-                    
+
                     if master_password.is_setup() {
                         // Verify current password first
                         let current_password = prompt_for_master_password(false)
                             .map_err(|e| NotedError::EncryptionError(e.to_string()))?;
-                            
-                        if !master_password.verify(&current_password)
+
+                        if !master_password
+                            .verify(&current_password)
                             .map_err(|e| NotedError::EncryptionError(e.to_string()))?
                         {
                             return Err(NotedError::InvalidMasterPassword);
                         }
-                        
+
                         // Get and decrypt all API keys
                         let mut api_keys = Vec::new();
-                        
+
                         if let Some(gemini) = &config.gemini {
                             if !gemini.api_key.is_empty() && gemini.api_key.is_encrypted_format() {
-                                api_keys.push(("gemini", gemini.api_key.decrypt(&current_password)
-                                    .map_err(|e| NotedError::EncryptionError(e.to_string()))?));
+                                api_keys.push((
+                                    "gemini",
+                                    gemini
+                                        .api_key
+                                        .decrypt(&current_password)
+                                        .map_err(|e| NotedError::EncryptionError(e.to_string()))?,
+                                ));
                             }
                         }
-                        
+
                         if let Some(claude) = &config.claude {
                             if !claude.api_key.is_empty() && claude.api_key.is_encrypted_format() {
-                                api_keys.push(("claude", claude.api_key.decrypt(&current_password)
-                                    .map_err(|e| NotedError::EncryptionError(e.to_string()))?));
+                                api_keys.push((
+                                    "claude",
+                                    claude
+                                        .api_key
+                                        .decrypt(&current_password)
+                                        .map_err(|e| NotedError::EncryptionError(e.to_string()))?,
+                                ));
                             }
                         }
-                        
+
                         if let Some(notion) = &config.notion {
                             if !notion.api_key.is_empty() && notion.api_key.is_encrypted_format() {
-                                api_keys.push(("notion", notion.api_key.decrypt(&current_password)
-                                    .map_err(|e| NotedError::EncryptionError(e.to_string()))?));
+                                api_keys.push((
+                                    "notion",
+                                    notion
+                                        .api_key
+                                        .decrypt(&current_password)
+                                        .map_err(|e| NotedError::EncryptionError(e.to_string()))?,
+                                ));
                             }
                         }
-                        
+
                         if let Some(openai) = &config.openai {
                             if let Some(api_key) = &openai.api_key {
                                 if !api_key.is_empty() && api_key.is_encrypted_format() {
-                                    api_keys.push(("openai", api_key.decrypt(&current_password)
-                                        .map_err(|e| NotedError::EncryptionError(e.to_string()))?));
+                                    api_keys.push((
+                                        "openai",
+                                        api_key.decrypt(&current_password).map_err(|e| {
+                                            NotedError::EncryptionError(e.to_string())
+                                        })?,
+                                    ));
                                 }
                             }
                         }
-                        
+
                         // Set up new password
                         println!("{}", "Setting new master password".yellow());
                         let new_password = prompt_for_master_password(true)
                             .map_err(|e| NotedError::EncryptionError(e.to_string()))?;
-                            
-                        master_password.setup(&new_password)
+
+                        master_password
+                            .setup(&new_password)
                             .map_err(|e| NotedError::EncryptionError(e.to_string()))?;
-                            
+
                         // Re-encrypt all API keys with new password
                         for (provider, key) in api_keys {
                             match provider {
                                 "gemini" => {
                                     if let Some(gemini) = &mut config.gemini {
                                         gemini.api_key = EncryptionData::new(&key, &new_password)
-                                            .map_err(|e| NotedError::EncryptionError(e.to_string()))?;
+                                            .map_err(|e| {
+                                            NotedError::EncryptionError(e.to_string())
+                                        })?;
                                     }
-                                },
+                                }
                                 "claude" => {
                                     if let Some(claude) = &mut config.claude {
                                         claude.api_key = EncryptionData::new(&key, &new_password)
-                                            .map_err(|e| NotedError::EncryptionError(e.to_string()))?;
+                                            .map_err(|e| {
+                                            NotedError::EncryptionError(e.to_string())
+                                        })?;
                                     }
-                                },
+                                }
                                 "notion" => {
                                     if let Some(notion) = &mut config.notion {
                                         notion.api_key = EncryptionData::new(&key, &new_password)
-                                            .map_err(|e| NotedError::EncryptionError(e.to_string()))?;
+                                            .map_err(|e| {
+                                            NotedError::EncryptionError(e.to_string())
+                                        })?;
                                     }
-                                },
+                                }
                                 "openai" => {
                                     if let Some(openai) = &mut config.openai {
                                         if openai.api_key.is_some() {
-                                            openai.api_key = Some(EncryptionData::new(&key, &new_password)
-                                                .map_err(|e| NotedError::EncryptionError(e.to_string()))?);
+                                            openai.api_key = Some(
+                                                EncryptionData::new(&key, &new_password).map_err(
+                                                    |e| NotedError::EncryptionError(e.to_string()),
+                                                )?,
+                                            );
                                         }
                                     }
-                                },
+                                }
                                 _ => {}
                             }
                         }
-                        
+
                         config.save()?;
                         println!("{}", "Master password changed successfully.".green());
                     } else {
                         // No master password set yet, just set a new one
-                        println!("{}", "No master password set yet. Setting up new master password.".yellow());
+                        println!(
+                            "{}",
+                            "No master password set yet. Setting up new master password.".yellow()
+                        );
                         let new_password = prompt_for_master_password(true)
                             .map_err(|e| NotedError::EncryptionError(e.to_string()))?;
-                            
-                        master_password.setup(&new_password)
+
+                        master_password
+                            .setup(&new_password)
                             .map_err(|e| NotedError::EncryptionError(e.to_string()))?;
-                            
+
                         println!("{}", "Master password set up successfully.".green());
                     }
                 }
             } else if migrate {
                 let mut config = Config::load()?;
-                
+
                 if !config.needs_migration() {
-                    println!("{}", "No migration needed. All API keys are already in encrypted format.".green());
+                    println!(
+                        "{}",
+                        "No migration needed. All API keys are already in encrypted format."
+                            .green()
+                    );
                     return Ok(());
                 }
-                
+
                 // Set up master password if not already set
-                let master_password = ensure_master_password(true).await?
+                let master_password = ensure_master_password(true)
+                    .await?
                     .ok_or(NotedError::MasterPasswordRequired)?;
-                    
-                println!("{}", "Migrating configuration to encrypted format...".yellow());
+
+                println!(
+                    "{}",
+                    "Migrating configuration to encrypted format...".yellow()
+                );
                 config.migrate(&master_password)?;
-                
+
                 println!("{}", "Migration completed successfully.".green());
             } else {
-                println!("Please specify a security command. Run with --help for more information.");
+                println!(
+                    "Please specify a security command. Run with --help for more information."
+                );
             }
-        },
+        }
         Commands::Config {
             set_api_key,
             set_claude_api_key,
@@ -367,16 +455,17 @@ async fn run() -> Result<(), NotedError> {
 
             if let Some(ref key) = set_api_key {
                 // For sensitive operations, require master password
-                let master_password = ensure_master_password(true).await?
+                let master_password = ensure_master_password(true)
+                    .await?
                     .ok_or(NotedError::MasterPasswordRequired)?;
-                
+
                 let mut config = Config::load()?;
                 config.active_provider = Some("gemini".to_string());
-                
+
                 // Encrypt the API key
                 let encrypted_key = EncryptionData::new(key, &master_password)
                     .map_err(|e| NotedError::EncryptionError(e.to_string()))?;
-                
+
                 config.gemini = Some(config::GeminiConfig {
                     api_key: encrypted_key,
                 });
@@ -387,16 +476,17 @@ async fn run() -> Result<(), NotedError> {
 
             if let Some(ref key) = set_claude_api_key {
                 // For sensitive operations, require master password
-                let master_password = ensure_master_password(true).await?
+                let master_password = ensure_master_password(true)
+                    .await?
                     .ok_or(NotedError::MasterPasswordRequired)?;
-                
+
                 let mut config = Config::load()?;
                 config.active_provider = Some("claude".to_string());
                 let model = Input::with_theme(&ColorfulTheme::default())
                     .with_prompt("Claude model")
                     .default("claude-3-opus-20240229".to_string())
                     .interact_text()?;
-                
+
                 // Encrypt the API key
                 let encrypted_key = EncryptionData::new(key, &master_password)
                     .map_err(|e| NotedError::EncryptionError(e.to_string()))?;
@@ -416,9 +506,10 @@ async fn run() -> Result<(), NotedError> {
                     "{}\n",
                     "Welcome to noted.md! Let's set up your AI provider.".bold()
                 );
-                
+
                 // For sensitive operations, require master password
-                let master_password = ensure_master_password(true).await?
+                let master_password = ensure_master_password(true)
+                    .await?
                     .ok_or(NotedError::MasterPasswordRequired)?;
 
                 let providers = vec![
@@ -439,13 +530,15 @@ async fn run() -> Result<(), NotedError> {
                         let api_key = Password::with_theme(&ColorfulTheme::default())
                             .with_prompt("Enter your Gemini API key: ")
                             .interact()?;
-                        
+
                         // Encrypt the API key
                         let encrypted_key = EncryptionData::new(&api_key, &master_password)
                             .map_err(|e| NotedError::EncryptionError(e.to_string()))?;
-                            
+
                         config.active_provider = Some("gemini".to_string());
-                        config.gemini = Some(GeminiConfig { api_key: encrypted_key });
+                        config.gemini = Some(GeminiConfig {
+                            api_key: encrypted_key,
+                        });
                         config.save()?;
                         println!("{}", "Config saved successfully.".green());
                     }
@@ -454,11 +547,11 @@ async fn run() -> Result<(), NotedError> {
                         let api_key = Password::with_theme(&ColorfulTheme::default())
                             .with_prompt("Enter your Claude API key: ")
                             .interact()?;
-                        
+
                         // Encrypt the API key
                         let encrypted_key = EncryptionData::new(&api_key, &master_password)
                             .map_err(|e| NotedError::EncryptionError(e.to_string()))?;
-                            
+
                         config.active_provider = Some("claude".to_string());
                         let anthropic_models = vec![
                             "    claude-opus-4-20250514",
@@ -482,7 +575,10 @@ async fn run() -> Result<(), NotedError> {
                             anthropic_models[selected_model].trim().to_string()
                         };
 
-                        config.claude = Some(ClaudeConfig { api_key: encrypted_key, model });
+                        config.claude = Some(ClaudeConfig {
+                            api_key: encrypted_key,
+                            model,
+                        });
                         config.save()?;
                         println!("{}", "Config saved successfully.".green());
                     }
@@ -550,11 +646,11 @@ async fn run() -> Result<(), NotedError> {
                     let api_key_str = Password::with_theme(&ColorfulTheme::default())
                         .with_prompt("Enter your Notion API key: ")
                         .interact()?;
-                    
+
                     // Encrypt the API key
                     let api_key = EncryptionData::new(&api_key_str, &master_password)
                         .map_err(|e| NotedError::EncryptionError(e.to_string()))?;
-                        
+
                     let database_id = Password::with_theme(&ColorfulTheme::default())
                         .with_prompt("Enter your Notion Database ID: ")
                         .interact()?;
@@ -591,14 +687,17 @@ async fn run() -> Result<(), NotedError> {
                             let properties: Vec<_> = schema
                                 .properties
                                 .into_iter()
-                                .filter(|(_name, property)| matches!(&property.type_specific_config,
-                                    PropertyType::Select { .. }
-                                    | PropertyType::MultiSelect { .. }
-                                    | PropertyType::RichText(_)
-                                    | PropertyType::Number(_)
-                                    | PropertyType::Date(_)
-                                    | PropertyType::Checkbox(_)
-                                ))
+                                .filter(|(_name, property)| {
+                                    matches!(
+                                        &property.type_specific_config,
+                                        PropertyType::Select { .. }
+                                            | PropertyType::MultiSelect { .. }
+                                            | PropertyType::RichText(_)
+                                            | PropertyType::Number(_)
+                                            | PropertyType::Date(_)
+                                            | PropertyType::Checkbox(_)
+                                    )
+                                })
                                 .collect();
 
                             let mut default_properties = Vec::new();
@@ -701,9 +800,7 @@ async fn run() -> Result<(), NotedError> {
                                     PropertyType::Number(_) => {
                                         let default_value: f64 =
                                             Input::with_theme(&ColorfulTheme::default())
-                                                .with_prompt(format!(
-                                                    "Default number for '{name}'"
-                                                ))
+                                                .with_prompt(format!("Default number for '{name}'"))
                                                 .interact()?;
                                         let prop_config = config::NotionPropertyConfig {
                                             name: name.clone(),
@@ -800,85 +897,98 @@ async fn run() -> Result<(), NotedError> {
             notion,
         } => {
             let config = Config::load()?;
-            
+
             // Check if configuration needs migration
             check_config_migration(&config)?;
 
             // For operations that need access to sensitive data, require master password
-            let master_password = ensure_master_password(true).await?
+            let master_password = ensure_master_password(true)
+                .await?
                 .ok_or(NotedError::MasterPasswordRequired)?;
-            
-            let client: Box<dyn AiProvider> = match config.active_provider.as_deref() {
-                Some("gemini") => {
-                    let final_api_key = if let Some(key) = api_key {
-                        key
-                    } else if let Some(gemini_config) = &config.gemini {
-                        // Decrypt the API key
-                        gemini_config.api_key.decrypt(&master_password)
-                            .map_err(|e| NotedError::EncryptionError(e.to_string()))?
-                    } else {
-                        return Err(NotedError::GeminiNotConfigured);
-                    };
-                    Box::new(GeminiClient::new(final_api_key, prompt))
-                }
-                Some("ollama") => {
-                    let url = if let Some(ollama_config) = &config.ollama {
-                        ollama_config.url.clone()
-                    } else {
-                        return Err(NotedError::OllamaNotConfigured);
-                    };
-                    let model = if let Some(ollama_config) = &config.ollama {
-                        ollama_config.model.clone()
-                    } else {
-                        return Err(NotedError::OllamaNotConfigured);
-                    };
-                    Box::new(OllamaClient::new(url, model, prompt))
-                }
-                Some("claude") => {
-                    let api_key = if let Some(key) = api_key {
-                        key
-                    } else if let Some(claude_config) = &config.claude {
-                        // Decrypt the API key
-                        claude_config.api_key.decrypt(&master_password)
-                            .map_err(|e| NotedError::EncryptionError(e.to_string()))?
-                    } else {
-                        return Err(NotedError::ClaudeNotConfigured);
-                    };
 
-                    let model = if let Some(claude_config) = &config.claude {
-                        claude_config.model.clone()
-                    } else {
-                        return Err(NotedError::ClaudeNotConfigured);
-                    };
-
-                    Box::new(ClaudeClient::new(api_key, model, prompt))
-                }
-                Some("openai") => {
-                    let url = if let Some(openai_config) = &config.openai {
-                        openai_config.url.clone()
-                    } else {
-                        return Err(NotedError::OpenAINotConfigured);
-                    };
-                    let model = if let Some(openai_config) = &config.openai {
-                        openai_config.model.clone()
-                    } else {
-                        return Err(NotedError::OpenAINotConfigured);
-                    };
-                    let api_key = if let Some(openai_config) = &config.openai {
-                        if let Some(encrypted_key) = &openai_config.api_key {
-                            // Decrypt the API key if present
-                            Some(encrypted_key.decrypt(&master_password)
-                                .map_err(|e| NotedError::EncryptionError(e.to_string()))?)
+            let (client, model_info, api_key): (Box<dyn AiProvider>, String, String) =
+                match config.active_provider.as_deref() {
+                    Some("gemini") => {
+                        let final_api_key = if let Some(key) = api_key {
+                            key
+                        } else if let Some(gemini_config) = &config.gemini {
+                            // Decrypt the API key
+                            gemini_config
+                                .api_key
+                                .decrypt(&master_password)
+                                .map_err(|e| NotedError::EncryptionError(e.to_string()))?
                         } else {
-                            None
-                        }
-                    } else {
-                        return Err(NotedError::OpenAINotConfigured);
-                    };
-                    Box::new(OpenAIClient::new(url, model, api_key, prompt))
-                }
-                _ => return Err(NotedError::NoActiveProvider),
-            };
+                            return Err(NotedError::GeminiNotConfigured);
+                        };
+                        (
+                            Box::new(GeminiClient::new()),
+                            "gemma-3-27b-it".to_string(),
+                            final_api_key,
+                        )
+                    }
+                    Some("ollama") => {
+                        let url = if let Some(ollama_config) = &config.ollama {
+                            ollama_config.url.clone()
+                        } else {
+                            return Err(NotedError::OllamaNotConfigured);
+                        };
+                        let model = if let Some(ollama_config) = &config.ollama {
+                            ollama_config.model.clone()
+                        } else {
+                            return Err(NotedError::OllamaNotConfigured);
+                        };
+                        let model_info = format!("{url}|{model}");
+                        (Box::new(OllamaClient::new()), model_info, String::new())
+                    }
+                    Some("claude") => {
+                        let final_api_key = if let Some(key) = api_key {
+                            key
+                        } else if let Some(claude_config) = &config.claude {
+                            // Decrypt the API key
+                            claude_config
+                                .api_key
+                                .decrypt(&master_password)
+                                .map_err(|e| NotedError::EncryptionError(e.to_string()))?
+                        } else {
+                            return Err(NotedError::ClaudeNotConfigured);
+                        };
+
+                        let model = if let Some(claude_config) = &config.claude {
+                            claude_config.model.clone()
+                        } else {
+                            return Err(NotedError::ClaudeNotConfigured);
+                        };
+
+                        (Box::new(ClaudeClient::new()), model, final_api_key)
+                    }
+                    Some("openai") => {
+                        let url = if let Some(openai_config) = &config.openai {
+                            openai_config.url.clone()
+                        } else {
+                            return Err(NotedError::OpenAINotConfigured);
+                        };
+                        let model = if let Some(openai_config) = &config.openai {
+                            openai_config.model.clone()
+                        } else {
+                            return Err(NotedError::OpenAINotConfigured);
+                        };
+                        let final_api_key = if let Some(openai_config) = &config.openai {
+                            if let Some(encrypted_key) = &openai_config.api_key {
+                                // Decrypt the API key if present
+                                encrypted_key
+                                    .decrypt(&master_password)
+                                    .map_err(|e| NotedError::EncryptionError(e.to_string()))?
+                            } else {
+                                String::new()
+                            }
+                        } else {
+                            return Err(NotedError::OpenAINotConfigured);
+                        };
+                        let model_info = format!("{url}|{model}");
+                        (Box::new(OpenAIClient::new()), model_info, final_api_key)
+                    }
+                    _ => return Err(NotedError::NoActiveProvider),
+                };
 
             let input_path = Path::new(&path);
             if !input_path.exists() {
@@ -890,11 +1000,12 @@ async fn run() -> Result<(), NotedError> {
             let (notion_client, notion_config) = if notion {
                 if let Some(config) = &config.notion {
                     // Decrypt the Notion API key
-                    let decrypted_api_key = config.api_key.decrypt(&master_password)
+                    let decrypted_api_key = config
+                        .api_key
+                        .decrypt(&master_password)
                         .map_err(|e| NotedError::EncryptionError(e.to_string()))?;
-                        
-                    let client = 
-                        NotionClient::new(decrypted_api_key, config.database_id.clone());
+
+                    let client = NotionClient::new(decrypted_api_key, config.database_id.clone());
                     (Some(client), Some(config))
                 } else {
                     return Err(NotedError::NotionNotConfigured);
@@ -934,17 +1045,33 @@ async fn run() -> Result<(), NotedError> {
 
                 for file_path_buf in files_to_convert {
                     if let Some(file_path_str) = file_path_buf.to_str() {
-                        if let Err(e) = process_and_save_file(
+                        match process_file_with_ai(
                             file_path_str,
                             client.as_ref(),
-                            output.as_deref(),
+                            &model_info,
+                            &api_key,
+                            prompt.clone(),
                             &progress_bar,
-                            notion_client.as_ref(),
-                            notion_config,
                         )
                         .await
                         {
-                            progress_bar.println(format!("{}", e.to_string().red()));
+                            Ok(markdown) => {
+                                if let Err(e) = save_file_and_notion(
+                                    file_path_str,
+                                    &markdown,
+                                    output.as_deref(),
+                                    &progress_bar,
+                                    notion_client.as_ref(),
+                                    notion_config,
+                                )
+                                .await
+                                {
+                                    progress_bar.println(format!("{}", e.to_string().red()));
+                                }
+                            }
+                            Err(e) => {
+                                progress_bar.println(format!("{}", e.to_string().red()));
+                            }
                         }
                     }
                     progress_bar.inc(1);
@@ -964,17 +1091,33 @@ async fn run() -> Result<(), NotedError> {
                         .unwrap(),
                 );
                 progress_bar.set_message("Processing file...");
-                if let Err(e) = process_and_save_file(
+                match process_file_with_ai(
                     path_str,
                     client.as_ref(),
-                    output.as_deref(),
+                    &model_info,
+                    &api_key,
+                    prompt,
                     &progress_bar,
-                    notion_client.as_ref(),
-                    notion_config,
                 )
                 .await
                 {
-                    progress_bar.println(format!("{}", e.to_string().red()));
+                    Ok(markdown) => {
+                        if let Err(e) = save_file_and_notion(
+                            path_str,
+                            &markdown,
+                            output.as_deref(),
+                            &progress_bar,
+                            notion_client.as_ref(),
+                            notion_config,
+                        )
+                        .await
+                        {
+                            progress_bar.println(format!("{}", e.to_string().red()));
+                        }
+                    }
+                    Err(e) => {
+                        progress_bar.println(format!("{}", e.to_string().red()));
+                    }
                 }
                 progress_bar.inc(1);
                 progress_bar

@@ -32,6 +32,12 @@ pub enum NotedError {
     #[error(" File type not supported: {0}")]
     UnsupportedFileType(String),
 
+    #[error(" File size exceeds limit: {0} MB. Maximum allowed: {1} MB")]
+    FileSizeExceeded(u64, u64),
+
+    #[error(" Provider {0} does not support file type: {1}")]
+    UnsupportedFileTypeForProvider(String, String),
+
     #[error(" Ollama is not configured properly. Please run 'notedmd config --edit' to set it up.")]
     OllamaNotConfigured,
 
@@ -54,16 +60,16 @@ pub enum NotedError {
 
     #[error(" Dialoguer error: {0}")]
     DialoguerError(#[from] dialoguer::Error),
-    
+
     #[error(" Encryption error: {0}")]
     EncryptionError(String),
-    
+
     #[error(" Master password required. Please set up a master password first.")]
     MasterPasswordRequired,
-    
+
     #[error(" Invalid master password.")]
     InvalidMasterPassword,
-    
+
     #[error(" Configuration needs migration: {0}")]
     MigrationRequired(String),
 }
